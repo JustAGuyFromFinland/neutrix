@@ -12,6 +12,10 @@ Purpose: give an AI coding agent the minimum, actionable context to be immediate
   - Tooling: `Cargo.toml` contains a `target.x86_64-blog_os` section (linker = `lld.exe`) and an `x86_64-blog_os.json` target file in repo root. Builds must target that JSON and have a suitable linker available on PATH.
   - The crate depends on `bootloader`/`x86_64` and uses unstable build-std features declared in `Cargo.toml`. Expect to use a nightly toolchain for some operations.
   - Common build path (adjust for your environment/tooling): build the kernel for the custom target file and produce a bootable image using the bootloader/bootimage workflow. If you maintain scripts or CI, ensure `lld` (or `lld.exe` on Windows) and the nightly toolchain are available.
+    - Common build command (example):
+      ```
+      cargo +nightly bootimage --release --target x86_64-blog_os.json -Z build-std=core,compiler_builtins,alloc
+      ```
 
 - Project conventions & important patterns
   - no_std / alloc: the project enables `#![no_std]` and uses `alloc` — rely on the global allocator in `src/memory/allocator.rs` (constants `HEAP_START` and `HEAP_SIZE`).

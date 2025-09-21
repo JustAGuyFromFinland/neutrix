@@ -93,3 +93,66 @@ pub async fn print_keypresses() {
         }
     }
 }
+
+/// Read a line (until Enter) from the keyboard asynchronously.
+///
+/// Handles backspace by removing the last character from the buffer and
+/// echoing the appropriate backspace behavior. Returns the typed line
+/// (without the terminating newline).
+///
+/// Usage:
+/// ```ignore
+/// // inside an async task on the kernel executor
+/// let line: alloc::string::String = devices::ps2keyboard::getline().await;
+/// println!("received line: {}", line);
+/// ```
+///
+/// Note: `getline` is async and must be awaited from the kernel's async executor
+/// (see `Executor::spawn` / `Task::new` usage in `src/main.rs`).
+pub async fn getline() -> alloc::string::String {
+    use alloc::string::String;
+    use alloc::vec::Vec;
+
+    let mut scancodes = ScancodeStream::new();
+    let mut keyboard = Keyboard::new(ScancodeSet1::new(),
+        layouts::Us104Key, HandleControl::Ignore);
+
+    let mut buf: Vec<char> = Vec::new();
+
+    while let Some(scancode) = scancodes.next().await {
+        if let Ok(Some(key_event)) = keyboard.add_byte(scancode) {
+            if let Some(key) = keyboard.process_keyevent(key_event) {
+                match key {
+                    DecodedKey::Unicode(character) => {
+                        match character {
+                            '\n' | '\r' => {
+                                // echo newline and return
+                                println!("");
+                                let s: String = buf.iter().collect();
+                                return s;
+                            }
+                            '\x08' => {
+                                // backspace - remove last char if any
+                                if let Some(_) = buf.pop() {
+                                    // Move cursor back, overwrite with space, move back again
+                                    // Many VGA terminals don't interpret backspace, so emulate
+                                    print!("\x08 \x08");
+                                }
+                            }
+                            c => {
+                                buf.push(c);
+                                print!("{}", c);
+                            }
+                        }
+                    }
+                    DecodedKey::RawKey(_key) => {
+                        // ignore raw keys for line input
+                    }
+                }
+            }
+        }
+    }
+
+    // If the stream ended, return whatever we have
+    buf.iter().collect()
+}
