@@ -8,8 +8,6 @@ pub mod exceptions;
 pub use exceptions::*;
 pub mod interrupts;
 pub use interrupts::*;
-pub mod paging;
-pub use paging::*;
 pub mod processor;
 pub use processor::*;
 pub mod task;

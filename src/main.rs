@@ -9,7 +9,6 @@ use core::arch::asm;
 use core::panic::PanicInfo;
 use bootloader::*;
 use x86_64::{structures::paging::Translate, VirtAddr, structures::paging::Page};
-use x86_64::registers::msr::{Msr, IA32_STAR, IA32_LSTAR, IA32_FMASK, IA32_KERNEL_GS_BASE};
 
 entry_point!(kernel_main);
 
