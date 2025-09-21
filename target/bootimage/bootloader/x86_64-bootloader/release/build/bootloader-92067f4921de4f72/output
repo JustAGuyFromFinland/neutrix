@@ -1,0 +1,7 @@
+cargo:rerun-if-changed=C:\Users\Krugex\Desktop\neutrix\neutrix\Cargo.toml
+cargo:rustc-link-search=native=C:\Users\Krugex\Desktop\neutrix\neutrix\target\bootimage\bootloader\x86_64-bootloader\release\build\bootloader-92067f4921de4f72\out
+cargo:rustc-link-lib=static=kernel_bin-neutrix
+cargo:rerun-if-env-changed=KERNEL
+cargo:rerun-if-env-changed=KERNEL_MANIFEST
+cargo:rerun-if-changed=C:\Users\Krugex\Desktop\neutrix\neutrix\target\x86_64-blog_os\release\neutrix
+cargo:rerun-if-changed=build.rs

@@ -1,0 +1,44 @@
+[package]
+name = "neutrix"
+version = "0.1.0"
+edition = "2024"
+
+[unstable]
+build-std-features = ["compiler-builtins-mem"]
+build-std = ["core", "compiler_builtins", "alloc"]
+
+[dependencies]
+bootloader = { version = "0.9", features = ["map_physical_memory"]}
+spin = "0.5.2"
+x86_64 = "0.15.2"
+volatile = "0.2.6"
+pic8259 = "0.10.1"
+pc-keyboard = "0.7.0"
+linked_list_allocator = "0.9.0"
+
+[dependencies.crossbeam-queue]
+version = "0.3.11"
+default-features = false
+features = ["alloc"]
+
+[dependencies.conquer-once]
+version = "0.2.0"
+default-features = false
+
+[dependencies.futures-util]
+version = "0.3.4"
+default-features = false
+features = ["alloc"]
+
+[dependencies.lazy_static]
+version = "1.0"
+features = ["spin_no_std"]
+
+[profile.release]
+panic = "abort"
+
+[target.x86_64-blog_os]
+linker = "lld.exe"
+
+[build]
+rustflags = ["-C", "target-cpu=native", "-C", "target-feature=+sse2"]
