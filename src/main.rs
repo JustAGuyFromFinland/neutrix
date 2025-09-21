@@ -18,9 +18,10 @@ use neutrix::*;
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
 	enable_sse();
+	let cpu_features = arch::detect_cpu_features();
+	arch::enable_cpu_features(&cpu_features);
 	init_gdt();
-	setcolor!(Color::Yellow, Color::Blue);
-	cls!();
+	setcolor!(Color::Yellow, Color::Black);
 	init_idt();
 	unsafe {interrupts::PICS.lock().initialize()};
 	x86_64::instructions::interrupts::enable();
