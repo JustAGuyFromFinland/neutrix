@@ -469,6 +469,9 @@ fn parse_facp(table_ptr: *const u8) {
         println!("  [FACP] X_Firmware Control: {:#x}", x_firmware_ctrl);
         println!("  [FACP] X_DSDT: {:#x}", x_dsdt);
     }
+    
+    // Enable ACPI using the FACP information
+    enable_acpi(facp);
 }
 
 /// Parse MADT (Multiple APIC Description Table)
@@ -582,5 +585,60 @@ fn parse_mcfg(table_ptr: *const u8) {
         
         offset += core::mem::size_of::<McfgAllocation>();
         alloc_count += 1;
+    }
+}
+
+/// Enable ACPI by disabling legacy power management and enabling ACPI mode
+/// This function should be called after parsing the FACP table
+pub fn enable_acpi(facp: &Facp) {
+    use crate::arch::ports::{outb, inb};
+    
+    // Copy packed fields to avoid alignment issues
+    let smi_cmd = facp.smi_cmd;
+    let acpi_enable = facp.acpi_enable;
+    let acpi_disable = facp.acpi_disable;
+    let pm1a_cnt_blk = facp.pm1a_cnt_blk;
+    let pm1b_cnt_blk = facp.pm1b_cnt_blk;
+    
+    println!("[ACPI] Enabling ACPI mode...");
+    
+    // Ensure ACPI is disabled first (write disable value to SMI command port)
+    if smi_cmd != 0 && acpi_disable != 0 {
+        println!("[ACPI] Disabling legacy power management (SMI_CMD: {:#x}, value: {:#x})", smi_cmd, acpi_disable);
+        unsafe { outb(smi_cmd as u16, acpi_disable) };
+    }
+    
+    // Small delay to let the disable command take effect
+    for _ in 0..10000 {
+        unsafe { core::arch::asm!("nop") };
+    }
+    
+    // Enable ACPI (write enable value to SMI command port)
+    if smi_cmd != 0 && acpi_enable != 0 {
+        println!("[ACPI] Enabling ACPI (SMI_CMD: {:#x}, value: {:#x})", smi_cmd, acpi_enable);
+        unsafe { outb(smi_cmd as u16, acpi_enable) };
+    }
+    
+    // Wait for ACPI to be enabled by checking SCI_EN bit in PM1 control register
+    // SCI_EN is typically bit 0 in the PM1 control register
+    if pm1a_cnt_blk != 0 {
+        println!("[ACPI] Waiting for ACPI to be enabled (PM1a_CNT: {:#x})", pm1a_cnt_blk);
+        
+        // Wait up to 3 seconds for ACPI to enable
+        for _ in 0..3000000 {
+            let pm1a_cnt = unsafe { inb(pm1a_cnt_blk as u16) };
+            if (pm1a_cnt & 0x01) != 0 { // SCI_EN bit set
+                println!("[ACPI] ACPI successfully enabled!");
+                return;
+            }
+            // Small delay
+            for _ in 0..10 {
+                unsafe { core::arch::asm!("nop") };
+            }
+        }
+        
+        println!("[ACPI] Warning: ACPI enable timeout - system may still be in legacy mode");
+    } else {
+        println!("[ACPI] ACPI enable command sent (no PM1 control block to verify)");
     }
 }
