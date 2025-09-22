@@ -19,8 +19,9 @@ pub fn enable_sse() {
     }
 }
 
-#[derive(Default)]
+#[derive(Default, Debug, Clone)]
 pub struct CpuFeatures {
+    pub vendor: [u8; 12],
     // Basic features EDX
     pub fpu: bool,
     pub vme: bool,
@@ -186,6 +187,23 @@ pub struct CpuFeatures {
 pub fn detect_cpu_features() -> CpuFeatures {
     let mut features = CpuFeatures::default();
     unsafe {
+        // Get CPU vendor string (CPUID leaf 0)
+        let vendor_result = __cpuid(0);
+        let vendor_bytes = [
+            (vendor_result.ebx & 0xFF) as u8,
+            ((vendor_result.ebx >> 8) & 0xFF) as u8,
+            ((vendor_result.ebx >> 16) & 0xFF) as u8,
+            ((vendor_result.ebx >> 24) & 0xFF) as u8,
+            (vendor_result.edx & 0xFF) as u8,
+            ((vendor_result.edx >> 8) & 0xFF) as u8,
+            ((vendor_result.edx >> 16) & 0xFF) as u8,
+            ((vendor_result.edx >> 24) & 0xFF) as u8,
+            (vendor_result.ecx & 0xFF) as u8,
+            ((vendor_result.ecx >> 8) & 0xFF) as u8,
+            ((vendor_result.ecx >> 16) & 0xFF) as u8,
+            ((vendor_result.ecx >> 24) & 0xFF) as u8,
+        ];
+        features.vendor = vendor_bytes;
         // Check for extended CPUID
         let max_extended = __cpuid(0x80000000).eax;
         if max_extended >= 0x80000001 {

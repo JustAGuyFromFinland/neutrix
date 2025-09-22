@@ -20,4 +20,6 @@ pub mod devices;
 pub use devices::*;
 pub mod memory;
 pub use memory::*;
+pub mod hal;
+pub use hal::*;
 

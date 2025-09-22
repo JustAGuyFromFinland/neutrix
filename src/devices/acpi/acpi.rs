@@ -104,17 +104,9 @@ fn search_rsdp_in_range(start: usize, end: usize, phys_offset: u64) -> Option<&'
 
 /// Initialize ACPI
 pub fn init_with_offset(phys_offset: VirtAddr) {
-    println!("[ACPI] Initializing ACPI...");
-
     if let Some(rsdp) = find_rsdp(phys_offset.as_u64()) {
-        println!("[ACPI] Found RSDP at {:p}", rsdp);
-        println!("[ACPI] ACPI revision: {}", rsdp.revision);
-        println!("[ACPI] RSDT/XSDT address: {:#x}", rsdp.table_address());
-
         // Parse RSDT/XSDT and list all tables
         parse_rsdt_xsdt(rsdp, phys_offset.as_u64());
-    } else {
-        println!("[ACPI] RSDP not found - ACPI not available");
     }
 }
 
@@ -351,11 +343,10 @@ impl Xsdt {
 pub fn parse_rsdt_xsdt(rsdp: &Rsdp, phys_offset: u64) {
     let table_addr = rsdp.table_address();
     let table_virt_addr = (table_addr + phys_offset) as *const AcpiTableHeader;
-    
+
     let header = unsafe { &*table_virt_addr };
-    
+
     if !header.checksum_valid() {
-        println!("[ACPI] RSDT/XSDT checksum invalid!");
         return;
     }
 
@@ -367,12 +358,8 @@ pub fn parse_rsdt_xsdt(rsdp: &Rsdp, phys_offset: u64) {
         let xsdt = unsafe { &*(table_virt_addr as *const Xsdt) };
         xsdt.entry_count()
     } else {
-        println!("[ACPI] Unknown RSDT/XSDT signature");
         return;
     };
-
-    let signature = core::str::from_utf8(&sig_bytes).unwrap_or("UNKNOWN");
-    println!("[ACPI] Found {} with {} entries", signature, entry_count);
 
     // Parse and list all tables
     if sig_bytes == *b"RSDT" {
@@ -395,28 +382,20 @@ pub fn parse_rsdt_xsdt(rsdp: &Rsdp, phys_offset: u64) {
 /// Print information about an ACPI table
 fn print_table_info(table_phys_addr: u64, phys_offset: u64) {
     let table_virt_addr = (table_phys_addr + phys_offset) as *const AcpiTableHeader;
-    
+
     // Check if address is valid (basic bounds check)
     if table_virt_addr.is_null() {
         return;
     }
-    
+
     let header = unsafe { &*table_virt_addr };
-    
+
     if header.checksum_valid() {
         // Copy packed fields to avoid alignment issues
         let signature = header.signature;
-        let length = header.length;
-        
-        println!("[ACPI] Table: {} at {:#x} ({} bytes)", 
-                 core::str::from_utf8(&signature).unwrap_or("INVALID"), 
-                 table_phys_addr,
-                 length);
 
         // Parse specific table types
         parse_specific_table(&signature, table_phys_addr, phys_offset);
-    } else {
-        println!("[ACPI] Invalid table at {:#x}", table_phys_addr);
     }
 }
 
@@ -436,209 +415,69 @@ fn parse_specific_table(signature: &[u8; 4], table_phys_addr: u64, phys_offset: 
 /// Parse FACP (Fixed ACPI Description Table)
 fn parse_facp(table_ptr: *const u8) {
     let facp = unsafe { &*(table_ptr as *const Facp) };
-    
-    // Copy packed fields to avoid alignment issues
-    let firmware_ctrl = facp.firmware_ctrl;
-    let dsdt = facp.dsdt;
-    let sci_int = facp.sci_int;
-    let smi_cmd = facp.smi_cmd;
-    let acpi_enable = facp.acpi_enable;
-    let acpi_disable = facp.acpi_disable;
-    let pm1a_evt_blk = facp.pm1a_evt_blk;
-    let pm1a_cnt_blk = facp.pm1a_cnt_blk;
-    let pm_tmr_blk = facp.pm_tmr_blk;
-    let iapc_boot_arch = facp.iapc_boot_arch;
-    let flags = facp.flags;
-    let x_firmware_ctrl = facp.x_firmware_ctrl;
-    let x_dsdt = facp.x_dsdt;
-    
-    println!("  [FACP] Firmware Control: {:#x}", firmware_ctrl);
-    println!("  [FACP] DSDT: {:#x}", dsdt);
-    println!("  [FACP] SCI Interrupt: {}", sci_int);
-    println!("  [FACP] SMI Command: {:#x}", smi_cmd);
-    println!("  [FACP] ACPI Enable: {:#x}", acpi_enable);
-    println!("  [FACP] ACPI Disable: {:#x}", acpi_disable);
-    println!("  [FACP] PM1a Event Block: {:#x}", pm1a_evt_blk);
-    println!("  [FACP] PM1a Control Block: {:#x}", pm1a_cnt_blk);
-    println!("  [FACP] PM Timer Block: {:#x}", pm_tmr_blk);
-    println!("  [FACP] Boot Architecture Flags: {:#x}", iapc_boot_arch);
-    println!("  [FACP] Flags: {:#x}", flags);
-    
-    // Check for extended addresses (ACPI 2.0+)
-    if facp.header.revision >= 2 {
-        println!("  [FACP] X_Firmware Control: {:#x}", x_firmware_ctrl);
-        println!("  [FACP] X_DSDT: {:#x}", x_dsdt);
-    }
-    
+
     // Enable ACPI using the FACP information
     enable_acpi(facp);
 }
 
 /// Parse MADT (Multiple APIC Description Table)
-fn parse_madt(table_ptr: *const u8) {
-    let madt = unsafe { &*(table_ptr as *const Madt) };
-    
-    // Copy packed fields to avoid alignment issues
-    let local_apic_addr = madt.local_apic_addr;
-    let flags = madt.flags;
-    
-    println!("  [MADT] Local APIC Address: {:#x}", local_apic_addr);
-    println!("  [MADT] Flags: {:#x}", flags);
-    
-    // Parse MADT entries
-    let entries_start = table_ptr as usize + core::mem::size_of::<Madt>();
-    let entries_end = table_ptr as usize + madt.header.length as usize;
-    
-    let mut offset = entries_start;
-    while offset < entries_end {
-        let entry_header = unsafe { &*(offset as *const MadtEntryHeader) };
-        let entry_type = entry_header.entry_type;
-        let length = entry_header.length;
-        
-        match entry_type {
-            0 => { // Local APIC
-                let entry = unsafe { &*(offset as *const MadtLocalApicEntry) };
-                let processor_id = entry.processor_id;
-                let apic_id = entry.apic_id;
-                let flags = entry.flags;
-                println!("    [MADT] Local APIC - Processor ID: {}, APIC ID: {}, Flags: {:#x}",
-                         processor_id, apic_id, flags);
-            }
-            1 => { // I/O APIC
-                let entry = unsafe { &*(offset as *const MadtIoApicEntry) };
-                let io_apic_id = entry.io_apic_id;
-                let io_apic_addr = entry.io_apic_addr;
-                let global_system_interrupt_base = entry.global_system_interrupt_base;
-                println!("    [MADT] I/O APIC - ID: {}, Address: {:#x}, Global System Interrupt Base: {}",
-                         io_apic_id, io_apic_addr, global_system_interrupt_base);
-            }
-            _ => {
-                println!("    [MADT] Unknown entry type: {}", entry_type);
-            }
-        }
-        
-        offset += length as usize;
-    }
+fn parse_madt(_table_ptr: *const u8) {
+    // MADT parsing logic can be added here if needed for CPU enumeration
+    // Currently just a placeholder to avoid unused parameter warning
 }
 
 /// Parse HPET (High Precision Event Timer)
-fn parse_hpet(table_ptr: *const u8) {
-    let hpet = unsafe { &*(table_ptr as *const Hpet) };
-    
-    // Copy packed fields to avoid alignment issues
-    let hardware_rev_id = hpet.hardware_rev_id;
-    let comparator_count = hpet.comparator_count;
-    let counter_size = hpet.counter_size;
-    let legacy_replacement = hpet.legacy_replacement;
-    let pci_vendor_id = hpet.pci_vendor_id;
-    let hpet_number = hpet.hpet_number;
-    let minimum_tick = hpet.minimum_tick;
-    let address = hpet.address;
-    let hpet_block_id = hpet.hpet_block_id;
-    let period = hpet.period;
-    
-    // Copy address structure fields to avoid alignment issues
-    let address_address = address.address;
-    let address_space = address.address_space;
-    
-    println!("  [HPET] Hardware Revision ID: {}", hardware_rev_id);
-    println!("  [HPET] Comparator Count: {}", comparator_count);
-    println!("  [HPET] Counter Size: {} bit", if counter_size == 1 { 64 } else { 32 });
-    println!("  [HPET] Legacy Replacement: {}", legacy_replacement);
-    println!("  [HPET] PCI Vendor ID: {:#x}", pci_vendor_id);
-    println!("  [HPET] HPET Number: {}", hpet_number);
-    println!("  [HPET] Minimum Tick: {}", minimum_tick);
-    println!("  [HPET] Address: {:#x} (Space: {})", 
-             address_address, address_space);
-    println!("  [HPET] HPET Block ID: {:#x}", hpet_block_id);
-    println!("  [HPET] Period: {} fs", period);
+fn parse_hpet(_table_ptr: *const u8) {
+    // HPET parsing logic can be added here if needed for timer configuration
+    // Currently just a placeholder to avoid unused parameter warning
 }
 
 /// Parse MCFG (PCI Express memory mapped configuration)
-fn parse_mcfg(table_ptr: *const u8) {
-    let mcfg = unsafe { &*(table_ptr as *const Mcfg) };
-    
-    println!("  [MCFG] PCI Express Configuration");
-    
-    // Parse configuration space allocations
-    let allocations_start = table_ptr as usize + core::mem::size_of::<Mcfg>();
-    let allocations_end = table_ptr as usize + mcfg.header.length as usize;
-    
-    let mut offset = allocations_start;
-    let mut alloc_count = 0;
-    
-    while offset + core::mem::size_of::<McfgAllocation>() <= allocations_end {
-        let allocation = unsafe { &*(offset as *const McfgAllocation) };
-        
-        // Copy packed fields to avoid alignment issues
-        let base_address = allocation.base_address;
-        let pci_segment_group = allocation.pci_segment_group;
-        let start_bus = allocation.start_bus;
-        let end_bus = allocation.end_bus;
-        
-        println!("    [MCFG] Allocation {}: Base {:#x}, Segment {}, Buses {}-{}",
-                 alloc_count,
-                 base_address,
-                 pci_segment_group,
-                 start_bus,
-                 end_bus);
-        
-        offset += core::mem::size_of::<McfgAllocation>();
-        alloc_count += 1;
-    }
+fn parse_mcfg(_table_ptr: *const u8) {
+    // MCFG parsing logic can be added here if needed for PCI configuration
+    // Currently just a placeholder to avoid unused parameter warning
 }
 
 /// Enable ACPI by disabling legacy power management and enabling ACPI mode
 /// This function should be called after parsing the FACP table
 pub fn enable_acpi(facp: &Facp) {
     use crate::arch::ports::{outb, inb};
-    
+
     // Copy packed fields to avoid alignment issues
     let smi_cmd = facp.smi_cmd;
     let acpi_enable = facp.acpi_enable;
     let acpi_disable = facp.acpi_disable;
     let pm1a_cnt_blk = facp.pm1a_cnt_blk;
-    let pm1b_cnt_blk = facp.pm1b_cnt_blk;
-    
-    println!("[ACPI] Enabling ACPI mode...");
-    
+
     // Ensure ACPI is disabled first (write disable value to SMI command port)
     if smi_cmd != 0 && acpi_disable != 0 {
-        println!("[ACPI] Disabling legacy power management (SMI_CMD: {:#x}, value: {:#x})", smi_cmd, acpi_disable);
         unsafe { outb(smi_cmd as u16, acpi_disable) };
     }
-    
+
     // Small delay to let the disable command take effect
     for _ in 0..10000 {
         unsafe { core::arch::asm!("nop") };
     }
-    
+
     // Enable ACPI (write enable value to SMI command port)
     if smi_cmd != 0 && acpi_enable != 0 {
-        println!("[ACPI] Enabling ACPI (SMI_CMD: {:#x}, value: {:#x})", smi_cmd, acpi_enable);
         unsafe { outb(smi_cmd as u16, acpi_enable) };
     }
-    
+
     // Wait for ACPI to be enabled by checking SCI_EN bit in PM1 control register
     // SCI_EN is typically bit 0 in the PM1 control register
     if pm1a_cnt_blk != 0 {
-        println!("[ACPI] Waiting for ACPI to be enabled (PM1a_CNT: {:#x})", pm1a_cnt_blk);
-        
         // Wait up to 3 seconds for ACPI to enable
         for _ in 0..3000000 {
             let pm1a_cnt = unsafe { inb(pm1a_cnt_blk as u16) };
             if (pm1a_cnt & 0x01) != 0 { // SCI_EN bit set
-                println!("[ACPI] ACPI successfully enabled!");
-                return;
+                return; // Success
             }
             // Small delay
             for _ in 0..10 {
                 unsafe { core::arch::asm!("nop") };
             }
         }
-        
-        println!("[ACPI] Warning: ACPI enable timeout - system may still be in legacy mode");
-    } else {
-        println!("[ACPI] ACPI enable command sent (no PM1 control block to verify)");
+        // Timeout - ACPI may not be enabled
     }
 }

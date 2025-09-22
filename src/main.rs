@@ -18,21 +18,25 @@ use neutrix::*;
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
 	enable_sse();
-	let cpu_features = arch::detect_cpu_features();
-	arch::enable_cpu_features(&cpu_features);
+	let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+	
+	// Initialize hardware through HAL
+	let (cpu_info, acpi_status) = hal::init_hardware(phys_mem_offset);
+	
+	// Continue with architecture-specific initialization
 	init_gdt();
 	setcolor!(Color::Yellow, Color::Black);
 	init_idt();
 	unsafe {interrupts::PICS.lock().initialize()};
 	x86_64::instructions::interrupts::enable();
-	let phys_mem_offset = VirtAddr::new(boot_info.physical_memory_offset);
+	
     let mut mapper = unsafe { memory::init(phys_mem_offset) };
     let mut frame_allocator = unsafe {
         BootInfoFrameAllocator::init(&boot_info.memory_map)
     };
 	allocator::init_heap(&mut mapper, &mut frame_allocator)
         .expect("heap initialization failed");
-	acpi::init_with_offset(phys_mem_offset);
+	
 	let mut executor = Executor::new();
 	executor.spawn(Task::new(print_keypresses()));
     executor.run();
