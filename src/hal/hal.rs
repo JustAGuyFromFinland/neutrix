@@ -76,6 +76,22 @@ pub fn init_hardware(phys_offset: VirtAddr) -> (CpuInfo, AcpiStatus) {
     // Initialize ACPI
     let acpi_status = init_acpi(phys_offset);
 
+    // Initialize Local APIC if possible
+    if crate::hal::apic::init_from_acpi(phys_offset) {
+        println!("[HAL] Local APIC initialized");
+    } else {
+        println!("[HAL] Local APIC not initialized or not present");
+    }
+
+    // Initialize IOAPICs discovered via ACPI MADT (if any)
+    crate::hal::ioapic::init_from_acpi(phys_offset);
+    // Apply Interrupt Source Overrides (ISOs) to IOAPIC configuration (logged/stubbed)
+    crate::hal::ioapic::apply_isos_from_acpi(phys_offset);
+    // As a fallback, ensure legacy ISA IRQs 0..15 are programmed into IOAPIC
+    // to the conventional vectors (masked). This makes keyboard (IRQ1)
+    // deliver to vector 0x21 when APIC-only interrupts are used.
+    crate::hal::ioapic::apply_legacy_isa_fallback(phys_offset);
+
     println!("[HAL] =========================================");
     println!("[HAL] Hardware initialization complete");
     println!("[HAL] =========================================");

@@ -3,12 +3,9 @@
 #![feature(abi_x86_interrupt)]
 #![feature(alloc_error_handler)]
 #![allow(warnings)]
-#![feature(alloc)]
 
-pub extern crate alloc;
-pub use alloc::*;
-pub use alloc::alloc::*;
-pub use alloc::boxed::*;
+// Provide the `alloc` crate to modules that need heap types (Vec, Box, String).
+extern crate alloc;
 
 pub mod arch;
 pub use arch::*;

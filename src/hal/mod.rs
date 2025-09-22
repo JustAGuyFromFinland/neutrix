@@ -5,3 +5,7 @@
 
 pub mod hal;
 pub use hal::*;
+pub mod apic;
+pub use apic::*;
+pub mod ioapic;
+pub use ioapic::*;

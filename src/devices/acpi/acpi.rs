@@ -2,6 +2,9 @@ use crate::*;
 use core::ptr;
 use core::str;
 use x86_64::VirtAddr;
+use core::sync::atomic::{AtomicU64, Ordering};
+use alloc::vec::Vec;
+use spin::Mutex;
 
 /// ACPI RSDP (Root System Description Pointer) structure
 #[repr(C, packed)]
@@ -421,9 +424,118 @@ fn parse_facp(table_ptr: *const u8) {
 }
 
 /// Parse MADT (Multiple APIC Description Table)
-fn parse_madt(_table_ptr: *const u8) {
-    // MADT parsing logic can be added here if needed for CPU enumeration
-    // Currently just a placeholder to avoid unused parameter warning
+fn parse_madt(table_ptr: *const u8) {
+    // Parse MADT and store useful information such as the Local APIC base address
+    if table_ptr.is_null() {
+        return;
+    }
+    let madt = unsafe { &*(table_ptr as *const Madt) };
+    // Validate checksum
+    if !madt.header.checksum_valid() {
+        return;
+    }
+
+    // Store the local APIC address for other subsystems to use
+    MADT_LOCAL_APIC_ADDR.store(madt.local_apic_addr as u64, Ordering::SeqCst);
+
+    // Parse MADT entries that follow the header: variable-length structures
+    let table_len = madt.header.length as usize;
+    let mut offset = core::mem::size_of::<Madt>();
+    while offset < table_len {
+        let entry_ptr = unsafe { table_ptr.add(offset) } as *const MadtEntryHeader;
+        if entry_ptr.is_null() {
+            break;
+        }
+        let entry_header = unsafe { &*entry_ptr };
+        let entry_len = entry_header.length as usize;
+        if entry_len == 0 {
+            break; // malformed
+        }
+
+        match entry_header.entry_type {
+            1 => {
+                // IO APIC
+                if entry_len >= core::mem::size_of::<MadtIoApicEntry>() {
+                    let ioapic = unsafe { &*(entry_ptr as *const MadtIoApicEntry) };
+                    IOAPICS.lock().push(IoApicInfo {
+                        id: ioapic.io_apic_id,
+                        addr: ioapic.io_apic_addr,
+                        gsi_base: ioapic.global_system_interrupt_base,
+                    });
+                }
+            }
+            2 => {
+                // Interrupt Source Override
+                if entry_len >= core::mem::size_of::<MadtInterruptSourceOverride>() {
+                    let iso = unsafe { &*(entry_ptr as *const MadtInterruptSourceOverride) };
+                    ISOS.lock().push(IsoInfo {
+                        bus: iso.bus,
+                        source: iso.source,
+                        gsi: iso.gsi,
+                        flags: iso.flags,
+                    });
+                }
+            }
+            _ => {
+                // Other MADT entries currently ignored
+            }
+        }
+
+        offset += entry_len;
+    }
+}
+
+// Atomic holder for the MADT local APIC address (0 = unknown/not set)
+static MADT_LOCAL_APIC_ADDR: AtomicU64 = AtomicU64::new(0);
+
+/// Return the Local APIC physical address discovered from the MADT, if any
+pub fn get_local_apic_address() -> Option<u32> {
+    let v = MADT_LOCAL_APIC_ADDR.load(Ordering::SeqCst);
+    if v == 0 {
+        None
+    } else {
+        Some(v as u32)
+    }
+}
+
+// --- IOAPIC / ISO storage and types ---
+#[derive(Debug, Clone, Copy)]
+pub struct IoApicInfo {
+    pub id: u8,
+    pub addr: u32,
+    pub gsi_base: u32,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub struct IsoInfo {
+    pub bus: u8,
+    pub source: u8,
+    pub gsi: u32,
+    pub flags: u16,
+}
+
+static IOAPICS: Mutex<Vec<IoApicInfo>> = Mutex::new(Vec::new());
+static ISOS: Mutex<Vec<IsoInfo>> = Mutex::new(Vec::new());
+
+/// Return a cloned list of discovered IOAPICs (id, addr, gsi_base)
+pub fn get_ioapics() -> Vec<IoApicInfo> {
+    IOAPICS.lock().clone()
+}
+
+/// Return a cloned list of Interrupt Source Overrides
+pub fn get_isos() -> Vec<IsoInfo> {
+    ISOS.lock().clone()
+}
+
+/// Packed MADT Interrupt Source Override structure
+#[repr(C, packed)]
+#[derive(Debug, Clone, Copy)]
+pub struct MadtInterruptSourceOverride {
+    pub header: MadtEntryHeader,
+    pub bus: u8,
+    pub source: u8,
+    pub gsi: u32,
+    pub flags: u16,
 }
 
 /// Parse HPET (High Precision Event Timer)

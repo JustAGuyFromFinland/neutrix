@@ -22,8 +22,11 @@ pub extern "x86-interrupt" fn keyboard_interrupt_handler(
     add_scancode(scancode); // new
 
     unsafe {
-        PICS.lock()
-            .notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+        if crate::hal::apic::is_initialized() {
+            crate::hal::apic::send_eoi();
+        } else {
+            PICS.lock().notify_end_of_interrupt(InterruptIndex::Keyboard.as_u8());
+        }
     }
 }
 
