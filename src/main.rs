@@ -54,6 +54,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 	// Initialize hardware through HAL (ACPI parsing may allocate)
 	let (cpu_info, acpi_status) = hal::init_hardware(phys_mem_offset);
 
+	// Scan PCI devices and register them with the device manager (no drivers attached yet)
+	// Pass the physical memory offset so PCI code can probe MMIO (MSI-X tables)
+	devices::pci::scan_and_register_with_phys_offset(phys_mem_offset.as_u64());
+
 	// Continue with architecture-specific initialization
 	init_gdt();
 	setcolor!(Color::Yellow, Color::Black);
@@ -78,6 +82,9 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 		}
 	}
 	x86_64::instructions::interrupts::enable();
+
+	// Print registered devices for debugging (human-readable class/subclass)
+	crate::driver_framework::manager::GLOBAL_MANAGER.list_devices();
 
 	let mut executor = Executor::new();
 	executor.spawn(Task::new(print_keypresses()));

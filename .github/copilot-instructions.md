@@ -23,6 +23,8 @@ Purpose: give an AI coding agent the minimum, actionable context to be immediate
   - Global writer: `src/bootvga/vga_buffer.rs` exposes a global `WRITER: Mutex<Writer>` via `lazy_static!`. Output is printed to VGA memory (0xb8000). Use the project's `println!` wrapper which writes to this writer.
   - Unsafe and low-level code is common: `src/rlib/mem.rs` provides SSE2-optimized `memcpy`, `memset`, `memcmp`, etc. Treat these as performance/ABI-sensitive; don't change calling conventions.
   - Interrupt and CPU setup: modifying `src/arch/*` (GDT/IDT/interrupts/exceptions) affects system stability; test in a VM (QEMU) before hardware.
+  - When adding a new global module directory under `src/` (for example `src/my_driver/`), also add and export it from `src/lib.rs` (for example `pub mod my_driver; pub use my_driver::*;`) so the crate exposes the module consistently.
+  - Project convention for new source files: append `use crate::*;` near the top of each new file. This keeps common macros and crate-level reexports available in modules across the kernel.
 
 - Integration points & cross-component notes
   - `BootInfo` -> `memory::init` in `src/memory/paging.rs` (maps physical memory to virtual via `physical_memory_offset`).
@@ -66,3 +68,25 @@ Purpose: give an AI coding agent the minimum, actionable context to be immediate
   - When adding or changing HAL APIs, keep them small, well-documented, and backward-compatible. Document ownership, inputs/outputs, and concurrency expectations. Prefer adding new helpers over mutating widely-used ones.
 
 If anything above is unclear or you want more detail (build commands for your exact setup, CI scripts, or examples of making a small change), tell me which part to expand and I will iterate.
+
+Additional developer notes — driver framework & PCI
+  - A small KMDF-like driver framework and PCI enumerator were added under `src/driver_framework/` and `src/devices/pci.rs`.
+  - Driver framework:
+    - `src/driver_framework/device.rs` contains `DeviceInfo`, `Resource` and `ResourceKind` and helper functions. `DeviceInfo` now includes `capabilities: Vec<Capability>`.
+    - `ResourceKind::Msi { vectors, addr64, maskable, msg_addr: u64, msg_data: u16 }` provides a canonical MSI message target for drivers. Use `Device::msi_resources()` to find MSI resources quickly.
+    - `ResourceKind::Msix { table_bar: u8, table_offset: u32, table_size: u16, table_present: bool, first_entry_masked: bool }` describes MSI-X table location and basic probe results.
+    - `Device::msix_resources()` returns cloned MSI-X resource entries for driver use.
+    - When adding new global modules, follow existing convention: export from `src/lib.rs` and include `use crate::*;` at top of new source files.
+  - PCI enumerator summary (`src/devices/pci.rs`):
+    - Scans buses/slots/functions using legacy port-based config (0xCF8/0xCFC). It reads BARs, sizes them (32/64-bit), and records MMIO/IO resources.
+    - Parses the capability list (when Status.capabilities_list is set) and records Power Management, PCI Express, MSI, MSI-X, and unknown capabilities into `DeviceInfo.capabilities`.
+    - MSI parsing normalizes the message address into a 64-bit `msg_addr` and 16-bit `msg_data` so drivers can program MSIs immediately.
+    - MSI-X parsing records the BIR (BAR indicator) and table offset/size. The scanner attempts to probe the first MSI-X entry by mapping the identified BAR using the kernel's `physical_memory_offset` heuristic and reading the first Vector Control — this is a heuristic probe and may be replaced with a mapper-based mapping for safety.
+  - Mapping & safety guidance:
+    - For robust MSI-X handling, map the exact BAR range using the kernel mapper (`memory::init` returns an `OffsetPageTable`) and a `FrameAllocator` before reading MSI-X tables. The PCI enumerator contains a fallback heuristic that computes virt = physical_memory_offset + phys.
+    - If you modify `scan_and_register_with_phys_offset` to accept a mapper/allocator, ensure caller sites (e.g., `main.rs`) pass the initialized `mapper` and `frame_allocator` (both are available after `memory::init` and `BootInfoFrameAllocator::init`). Mapping must be page-aligned and flushed.
+  - Driver author tips:
+    - Prefer using `GLOBAL_MANAGER` in `crate::driver_framework::manager` to find and attach drivers. Use `Device::info()` to snapshot device metadata and `msi_resources()` / `msix_resources()` for interrupt setup.
+    - Treat reads of device MMIO memory as unsafe — prefer using the kernel mapper to create a safe virtual mapping instead of relying on `physical_memory_offset + phys` heuristics.
+    - When building interrupt handlers that use MSI-X, validate `first_entry_masked` and `table_present` from the `Msix` resource before claiming entries.
+
