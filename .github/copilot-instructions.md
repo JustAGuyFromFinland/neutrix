@@ -23,8 +23,16 @@ Purpose: give an AI coding agent the minimum, actionable context to be immediate
   - Global writer: `src/bootvga/vga_buffer.rs` exposes a global `WRITER: Mutex<Writer>` via `lazy_static!`. Output is printed to VGA memory (0xb8000). Use the project's `println!` wrapper which writes to this writer.
   - Unsafe and low-level code is common: `src/rlib/mem.rs` provides SSE2-optimized `memcpy`, `memset`, `memcmp`, etc. Treat these as performance/ABI-sensitive; don't change calling conventions.
   - Interrupt and CPU setup: modifying `src/arch/*` (GDT/IDT/interrupts/exceptions) affects system stability; test in a VM (QEMU) before hardware.
-  - When adding a new global module directory under `src/` (for example `src/my_driver/`), also add and export it from `src/lib.rs` (for example `pub mod my_driver; pub use my_driver::*;`) so the crate exposes the module consistently.
-  - Project convention for new source files: append `use crate::*;` near the top of each new file. This keeps common macros and crate-level reexports available in modules across the kernel.
+  - When adding a new global module directory under `src/` (for example `src/my_driver/`), you MUST add and export it from `src/lib.rs` so the crate exposes the module consistently. Example lines to add to `src/lib.rs`:
+
+      pub mod my_driver;
+      pub use my_driver::*;
+  - Project convention for new Rust source files: always include `use crate::*;` near the top of each new file (one of the first non-comment lines). Put it immediately after any `mod`/`pub mod` declarations or file-level doc comments. Example:
+
+      // ...file-level comments/docs...
+      use crate::*;
+
+    This ensures common macros and crate-level re-exports are available to every module. Missing this line causes commonly-used macros and items to be unavailable in new files.
 
 - Integration points & cross-component notes
   - `BootInfo` -> `memory::init` in `src/memory/paging.rs` (maps physical memory to virtual via `physical_memory_offset`).
@@ -76,7 +84,7 @@ Additional developer notes — driver framework & PCI
     - `ResourceKind::Msi { vectors, addr64, maskable, msg_addr: u64, msg_data: u16 }` provides a canonical MSI message target for drivers. Use `Device::msi_resources()` to find MSI resources quickly.
     - `ResourceKind::Msix { table_bar: u8, table_offset: u32, table_size: u16, table_present: bool, first_entry_masked: bool }` describes MSI-X table location and basic probe results.
     - `Device::msix_resources()` returns cloned MSI-X resource entries for driver use.
-    - When adding new global modules, follow existing convention: export from `src/lib.rs` and include `use crate::*;` at top of new source files.
+  - When adding new global modules, it is mandatory to export them from `src/lib.rs` (see example above) and include `use crate::*;` at the top of each new source file.
   - PCI enumerator summary (`src/devices/pci.rs`):
     - Scans buses/slots/functions using legacy port-based config (0xCF8/0xCFC). It reads BARs, sizes them (32/64-bit), and records MMIO/IO resources.
     - Parses the capability list (when Status.capabilities_list is set) and records Power Management, PCI Express, MSI, MSI-X, and unknown capabilities into `DeviceInfo.capabilities`.
