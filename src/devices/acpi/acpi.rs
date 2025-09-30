@@ -1,10 +1,13 @@
 use crate::*;
-use core::ptr;
 use core::str;
+use core::ptr;
 use x86_64::VirtAddr;
 use core::sync::atomic::{AtomicU64, Ordering};
 use alloc::vec::Vec;
 use spin::Mutex;
+use crate::driver_framework::manager::GLOBAL_MANAGER;
+use crate::driver_framework::device::{DeviceInfo, Resource, ResourceKind, Capability};
+// note: `core::ptr` already imported above
 
 /// ACPI RSDP (Root System Description Pointer) structure
 #[repr(C, packed)]
@@ -394,8 +397,30 @@ fn print_table_info(table_phys_addr: u64, phys_offset: u64) {
     let header = unsafe { &*table_virt_addr };
 
     if header.checksum_valid() {
-        // Copy packed fields to avoid alignment issues
-        let signature = header.signature;
+        // Copy packed fields to locals to avoid unaligned references
+        let mut signature = [0u8; 4];
+        signature.copy_from_slice(&header.signature);
+        let length = header.length as u64;
+
+        // Register a generic device representing this ACPI table so the
+        // device manager is aware of ACPI-provided components.
+        let table_desc = alloc::format!("ACPI table: {}", header.signature_str());
+        let info = DeviceInfo {
+            vendor_id: 0xffff,
+            device_id: 0xffff,
+            class: 0xFF, // vendor/system-specific
+            subclass: 0x00,
+            prog_if: 0x00,
+            resources: {
+                let mut v = Vec::new();
+                v.push(Resource { kind: ResourceKind::MemoryMapped, addr: table_phys_addr, len: length });
+                v
+            },
+            capabilities: Vec::new(),
+            description: table_desc,
+        };
+        let id = GLOBAL_MANAGER.register_device(info);
+        println!("ACPI: registered table device id={} sig={:?} @ {:#x}", id, signature, table_phys_addr);
 
         // Parse specific table types
         parse_specific_table(&signature, table_phys_addr, phys_offset);
@@ -457,11 +482,34 @@ fn parse_madt(table_ptr: *const u8) {
                 // IO APIC
                 if entry_len >= core::mem::size_of::<MadtIoApicEntry>() {
                     let ioapic = unsafe { &*(entry_ptr as *const MadtIoApicEntry) };
+                    // Copy packed fields to locals to avoid unaligned references
+                    let apic_id = ioapic.io_apic_id;
+                    let apic_addr = ioapic.io_apic_addr;
+                    let gsi_base = ioapic.global_system_interrupt_base;
+
                     IOAPICS.lock().push(IoApicInfo {
-                        id: ioapic.io_apic_id,
-                        addr: ioapic.io_apic_addr,
-                        gsi_base: ioapic.global_system_interrupt_base,
+                        id: apic_id,
+                        addr: apic_addr,
+                        gsi_base: gsi_base,
                     });
+                    // Register IOAPIC as a device so drivers/consumers can bind to it.
+                    let info = DeviceInfo {
+                        vendor_id: 0xffff,
+                        device_id: apic_id as u16,
+                        class: 0x08, // Base System Peripheral
+                        subclass: 0x00,
+                        prog_if: 0x00,
+                        resources: {
+                            let mut v = Vec::new();
+                            // IOAPIC registers are typically MMIO; length is conservative
+                            v.push(Resource { kind: ResourceKind::MemoryMapped, addr: apic_addr as u64, len: 0x100 });
+                            v
+                        },
+                        capabilities: Vec::new(),
+                        description: alloc::format!("ACPI IOAPIC id={} gsi_base={}", apic_id, gsi_base),
+                    };
+                    let id = GLOBAL_MANAGER.register_device(info);
+                    println!("ACPI: registered IOAPIC device id={} apic_id={} gsi_base={} @ {:#x}", id, apic_id, gsi_base, apic_addr);
                 }
             }
             2 => {
@@ -517,6 +565,20 @@ pub struct IsoInfo {
 static IOAPICS: Mutex<Vec<IoApicInfo>> = Mutex::new(Vec::new());
 static ISOS: Mutex<Vec<IsoInfo>> = Mutex::new(Vec::new());
 
+// Store discovered HPET base address and period (femtoseconds)
+static HPET_BASE: Mutex<Option<u64>> = Mutex::new(None);
+static HPET_PERIOD_FS: AtomicU64 = AtomicU64::new(0);
+
+/// Return HPET base physical address if discovered
+pub fn get_hpet_address() -> Option<u64> {
+    HPET_BASE.lock().clone()
+}
+
+/// Return HPET period in femtoseconds (as discovered from ACPI), or 0 if unknown
+pub fn get_hpet_period_fs() -> u64 {
+    HPET_PERIOD_FS.load(Ordering::SeqCst)
+}
+
 /// Return a cloned list of discovered IOAPICs (id, addr, gsi_base)
 pub fn get_ioapics() -> Vec<IoApicInfo> {
     IOAPICS.lock().clone()
@@ -540,14 +602,83 @@ pub struct MadtInterruptSourceOverride {
 
 /// Parse HPET (High Precision Event Timer)
 fn parse_hpet(_table_ptr: *const u8) {
-    // HPET parsing logic can be added here if needed for timer configuration
-    // Currently just a placeholder to avoid unused parameter warning
+    if _table_ptr.is_null() {
+        return;
+    }
+    // Safe read of HPET header and GenericAddressStructure (packed)
+    let hpet = unsafe { &*(_table_ptr as *const Hpet) };
+    if !hpet.header.checksum_valid() {
+        return;
+    }
+    // Copy GAS (GenericAddressStructure) using read_unaligned to avoid UB
+    let gas_ptr = unsafe { &hpet.address as *const GenericAddressStructure } as *const GenericAddressStructure;
+    let gas = unsafe { ptr::read_unaligned(gas_ptr) };
+    if gas.address != 0 {
+        let addr = gas.address;
+        // store discovered HPET base and period for other subsystems
+        HPET_BASE.lock().replace(addr);
+        HPET_PERIOD_FS.store(hpet.period as u64, Ordering::SeqCst);
+        let info = DeviceInfo {
+            vendor_id: 0xffff,
+            device_id: 0xffff,
+            class: 0x04, // Multimedia/Timer
+            subclass: 0x00,
+            prog_if: 0x00,
+            resources: {
+                let mut v = Vec::new();
+                v.push(Resource { kind: ResourceKind::MemoryMapped, addr: addr, len: 0x1000 });
+                v
+            },
+            capabilities: Vec::new(),
+            description: alloc::format!("ACPI HPET @ {:#x}", addr),
+        };
+        let id = GLOBAL_MANAGER.register_device(info);
+        println!("ACPI: registered HPET device id={} @ {:#x}", id, addr);
+    }
 }
 
 /// Parse MCFG (PCI Express memory mapped configuration)
 fn parse_mcfg(_table_ptr: *const u8) {
-    // MCFG parsing logic can be added here if needed for PCI configuration
-    // Currently just a placeholder to avoid unused parameter warning
+    // Parse MCFG to register PCI ECAM regions as devices so the device
+    // manager knows about PCI root segments discovered via ACPI.
+    if _table_ptr.is_null() {
+        return;
+    }
+    // The MCFG header is followed by one or more McfgAllocation entries.
+    let header = unsafe { &*(_table_ptr as *const Mcfg) };
+    let total_len = header.header.length as usize;
+    let mut offset = core::mem::size_of::<Mcfg>();
+    while offset + core::mem::size_of::<McfgAllocation>() <= total_len {
+        let alloc_ptr = unsafe { _table_ptr.add(offset) } as *const McfgAllocation;
+        let alloc = unsafe { &*alloc_ptr };
+        // copy fields to locals to avoid packed/unaligned access issues
+        let base = alloc.base_address;
+        let seg = alloc.pci_segment_group;
+        let start_bus = alloc.start_bus;
+        let end_bus = alloc.end_bus;
+
+        // Register a device representing this PCI ECAM region
+        let info = DeviceInfo {
+            vendor_id: 0xffff,
+            device_id: seg,
+            class: 0x06, // Bridge / system
+            subclass: 0x00,
+            prog_if: 0x00,
+            resources: {
+                let mut v = Vec::new();
+                v.push(Resource { kind: ResourceKind::MemoryMapped, addr: base, len: 0 });
+                v
+            },
+            capabilities: Vec::new(),
+            description: alloc::format!("ACPI MCFG ECAM seg={} buses={}..{} @ {:#x}", seg, start_bus, end_bus, base),
+        };
+        let id = GLOBAL_MANAGER.register_device(info);
+        // push to global MCFG list for later ECAM-based PCI scanning
+        MCFG_ALLOCS.lock().push(*alloc);
+        println!("ACPI: registered MCFG ECAM id={} seg={} buses={}..{} @ {:#x}", id, seg, start_bus, end_bus, base);
+
+        offset += core::mem::size_of::<McfgAllocation>();
+    }
 }
 
 /// Enable ACPI by disabling legacy power management and enabling ACPI mode
@@ -592,4 +723,12 @@ pub fn enable_acpi(facp: &Facp) {
         }
         // Timeout - ACPI may not be enabled
     }
+}
+
+// Store MCFG allocations discovered from ACPI so other subsystems (PCI) can use ECAM ranges
+static MCFG_ALLOCS: Mutex<Vec<McfgAllocation>> = Mutex::new(Vec::new());
+
+/// Return a cloned list of MCFG allocations discovered by ACPI.
+pub fn get_mcfg_allocs() -> Vec<McfgAllocation> {
+    MCFG_ALLOCS.lock().clone()
 }

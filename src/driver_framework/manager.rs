@@ -7,6 +7,7 @@ use core::sync::atomic::{AtomicUsize, Ordering};
 use crate::driver_framework::device::{Device, DeviceHandle, DeviceInfo};
 use crate::driver_framework::driver::{DriverBox};
 pub use crate::*;
+use crate::alloc::string::ToString;
 
 static NEXT_DEVICE_ID: AtomicUsize = AtomicUsize::new(1);
 
@@ -33,6 +34,36 @@ impl DeviceManager {
 		let entry = RegistryEntry { device: dev, driver: None };
 		self.devices.lock().push(entry);
 		id
+	}
+
+	/// Merge `info` into an existing device with the same vendor/device id if found.
+	/// Returns Some(device_id) if merged, or None if no matching device exists.
+	pub fn merge_or_register(&self, info: DeviceInfo) -> Option<usize> {
+		let mut devices = self.devices.lock();
+		if let Some(entry) = devices.iter_mut().find(|e| {
+			let i = e.device.info.lock();
+			i.vendor_id == info.vendor_id && i.device_id == info.device_id
+		}) {
+			// Merge resources and capabilities that are missing
+			let mut existing = entry.device.info.lock();
+			for r in info.resources.iter() {
+				if !existing.resources.iter().any(|er| er.kind == r.kind && er.addr == r.addr) {
+					existing.resources.push(r.clone());
+				}
+			}
+			for c in info.capabilities.iter() {
+				// naive dedupe by debug representation
+				if !existing.capabilities.iter().any(|ec| format!("{:?}", ec) == format!("{:?}", c)) {
+					existing.capabilities.push(c.clone());
+				}
+			}
+			// Append to description if missing parts
+			if !existing.description.contains(&info.description) {
+				existing.description = alloc::format!("{}; {}", existing.description, info.description);
+			}
+			return Some(entry.device.id);
+		}
+		None
 	}
 
 	/// Attach a driver to a device id. The manager calls probe, then start.
@@ -95,52 +126,68 @@ impl DeviceManager {
 		println!("DeviceManager: {} devices registered", devices.len());
 		for e in devices.iter() {
 			let info = e.device.info.lock();
-			let class_str = crate::driver_framework::device::class_subclass_to_string(info.class, info.subclass, info.prog_if);
-			// Truncate description to 32 chars for neat output
-			let mut desc = info.description.clone();
-			if desc.len() > 32 {
-				desc.truncate(29);
-				desc.push_str("...");
-			}
-			// Build resource string compactly
-			let mut res_str = alloc::string::String::new();
-			for r in info.resources.iter() {
-				match r.kind {
-					crate::driver_framework::device::ResourceKind::MemoryMapped => {
-						res_str.push_str(&alloc::format!("MMIO@{:#x}:{:#x} ", r.addr, r.len));
-					}
-					crate::driver_framework::device::ResourceKind::IO => {
-						res_str.push_str(&alloc::format!("IO@{:#x}:{:#x} ", r.addr, r.len));
-					}
-					crate::driver_framework::device::ResourceKind::Interrupt(l) => {
-						res_str.push_str(&alloc::format!("IRQ@{} ", l));
-					}
-					crate::driver_framework::device::ResourceKind::Msi { vectors, .. } => {
-						res_str.push_str(&alloc::format!("MSI(v{}) ", vectors));
-					}
-					crate::driver_framework::device::ResourceKind::Msix { table_bar, table_offset, table_size, table_present, first_entry_masked } => {
-						res_str.push_str(&alloc::format!("MSI-X[bar{}@{:#x},n={},present={},masked={}] ", table_bar, table_offset, table_size, table_present, first_entry_masked));
-					}
-				}
-			}
-			// Build capability summary
-			let mut cap_str = alloc::string::String::new();
-			for c in info.capabilities.iter() {
+			// Map PCI class/subclass/prog_if to a concise canonical type name.
+			let concise_type = {
+				let c = info.class;
+				let s = info.subclass;
+				let p = info.prog_if;
 				match c {
-					crate::driver_framework::device::Capability::PowerManagement { .. } => cap_str.push_str("PM "),
-					crate::driver_framework::device::Capability::PciExpress { .. } => cap_str.push_str("PCIe "),
-					crate::driver_framework::device::Capability::Other { id, .. } => cap_str.push_str(&alloc::format!("C{:02x} ", id)),
+					0x00 => "Unclassified".to_string(),
+					0x01 => match s {
+						0x00 => "SCSI controller".to_string(),
+						0x01 => "IDE controller".to_string(),
+						0x02 => "Floppy controller".to_string(),
+						0x06 => {
+							// SATA - use prog_if for AHCI
+							match p {
+								0x01 => "SATA (AHCI)".to_string(),
+								_ => "SATA controller".to_string(),
+							}
+						}
+						_ => "Mass storage controller".to_string(),
+					},
+					0x02 => match s {
+						0x00 => "Ethernet controller".to_string(),
+						0x80 => "Network controller (other)".to_string(),
+						_ => "Network controller".to_string(),
+					},
+					0x03 => match s {
+						0x00 => "VGA compatible controller".to_string(),
+						0x01 => "3D controller".to_string(),
+						_ => "Display controller".to_string(),
+					},
+					0x04 => match s {
+						0x00 => "Multimedia video controller".to_string(),
+						0x01 => "Audio controller".to_string(),
+						_ => "Multimedia controller".to_string(),
+					},
+					0x05 => "Memory controller".to_string(),
+					0x06 => match s {
+						0x04 => "PCI-to-PCI bridge".to_string(),
+						_ => "Bridge".to_string(),
+					},
+					0x07 => "Simple communication controller".to_string(),
+					0x08 => "Base system peripheral".to_string(),
+					0x09 => match s {
+						0x00 => "Keyboard".to_string(),
+						0x01 => "Digitizer".to_string(),
+						_ => "Input device".to_string(),
+					},
+					0x0C => match s {
+						0x03 => match p {
+							0x00 => "USB UHCI".to_string(),
+							0x10 => "USB OHCI".to_string(),
+							0x20 => "USB EHCI".to_string(),
+							0x30 => "USB XHCI".to_string(),
+							_ => "USB controller".to_string(),
+						},
+						_ => "Serial bus controller".to_string(),
+					},
+					0xFF => "Vendor-specific".to_string(),
+					_ => "Unknown".to_string(),
 				}
-			}
-			println!(" - id={:>3} {:04x}:{:04x} | {:30} | {:32} | {} caps={} driver={}",
-					e.device.id,
-					info.vendor_id,
-					info.device_id,
-					class_str,
-					desc,
-					res_str,
-					cap_str,
-					if e.driver.is_some() {"yes"} else {"no"});
+			};
+			println!(" - id={:>3} {:04x}:{:04x} {}", e.device.id, info.vendor_id, info.device_id, concise_type);
 		}
 	}
 }

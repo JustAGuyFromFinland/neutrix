@@ -10,5 +10,7 @@ pub mod interrupts;
 pub use interrupts::*;
 pub mod processor;
 pub use processor::*;
+pub mod tsc_timer;
+pub use tsc_timer::*;
 pub mod task;
 pub use task::*;

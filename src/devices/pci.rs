@@ -4,6 +4,7 @@ use crate::arch::ports::{outdw, indw};
 use alloc::string::String;
 use crate::*;
 use alloc::format;
+use crate::devices::acpi;
 
 fn pci_write(bus: u8, slot: u8, func: u8, offset: u8, val: u32) {
     let addr = pci_config_address(bus, slot, func, offset);
@@ -33,106 +34,123 @@ pub fn scan_and_register() {
 
 /// Scan with a physical memory offset so we can map BARs for MSI-X table reads.
 pub fn scan_and_register_with_phys_offset(physical_memory_offset: u64) {
-    // Scan all buses (0-255). This is simple and safe for a basic enumerator.
-    for bus in 0u8..=255u8 {
-        for slot in 0u8..32u8 {
-            // First probe function 0 to see if device exists and whether it's multifunction
-            let vendor_device = pci_read(bus, slot, 0, 0);
-            let vendor0 = (vendor_device & 0xFFFF) as u16;
-            if vendor0 == 0xFFFF || vendor0 == 0x0000 {
-                continue;
-            }
+    // If ACPI provided MCFG ECAM ranges, use them for memory-mapped config access.
+    let mcfgs = acpi::get_mcfg_allocs();
+    if !mcfgs.is_empty() {
+        for alloc in mcfgs.iter() {
+            let base = alloc.base_address;
+            let start_bus = alloc.start_bus;
+            let end_bus = alloc.end_bus;
+            for bus in start_bus..=end_bus {
+                for slot in 0u8..32u8 {
+                    // probe function 0 via ECAM
+                    let cfg_addr = base + ((bus as u64) << 20) + ((slot as u64) << 15) + (0 << 12);
+                    let phys = physical_memory_offset.wrapping_add(cfg_addr);
+                    let dword0 = unsafe { (phys as *const u32).read_volatile() };
+                    let vendor0 = (dword0 & 0xFFFF) as u16;
+                    if vendor0 == 0xFFFF || vendor0 == 0x0000 { continue; }
 
-            // Determine if multifunction by reading header type (byte at 0x0E)
-            let header_dword = pci_read(bus, slot, 0, 0x0C);
-            let header_type = ((header_dword >> 16) & 0xFF) as u8;
-            let multifunction = (header_type & 0x80) != 0;
+                    // Determine multifunction
+                    let header_dword = unsafe { ((phys as *const u32).add(3)).read_volatile() };
+                    let header_type = ((header_dword >> 16) & 0xFF) as u8;
+                    let multifunction = (header_type & 0x80) != 0;
+                    let max_funcs = if multifunction { 8 } else { 1 };
 
-            let max_funcs = if multifunction { 8 } else { 1 };
+                    for func in 0u8..max_funcs {
+                        let cfg_addr_f = base + ((bus as u64) << 20) + ((slot as u64) << 15) + ((func as u64) << 12);
+                        let phys_f = physical_memory_offset.wrapping_add(cfg_addr_f);
+                        let dword = unsafe { (phys_f as *const u32).read_volatile() };
+                        let vendor = (dword & 0xFFFF) as u16;
+                        if vendor == 0xFFFF || vendor == 0x0000 { continue; }
 
-            for func in 0u8..max_funcs {
-                let vendor_device = pci_read(bus, slot, func, 0);
-                let vendor = (vendor_device & 0xFFFF) as u16;
-                if vendor == 0xFFFF || vendor == 0x0000 {
-                    continue;
-                }
-                let device = ((vendor_device >> 16) & 0xFFFF) as u16;
-                let class_reg = pci_read(bus, slot, func, 8);
-                let prog_if = ((class_reg >> 8) & 0xFF) as u8;
-                let subclass = ((class_reg >> 16) & 0xFF) as u8;
-                let class = ((class_reg >> 24) & 0xFF) as u8;
+                        let device = ((dword >> 16) & 0xFFFF) as u16;
+                        // Read class/prog_if from dword at offset 8 (index 2)
+                        let class_dword = unsafe { (phys_f as *const u32).add(2).read_volatile() };
+                        let prog_if = ((class_dword >> 8) & 0xFF) as u8;
+                        let subclass = ((class_dword >> 16) & 0xFF) as u8;
+                        let class = ((class_dword >> 24) & 0xFF) as u8;
 
-                let mut resources = alloc::vec::Vec::new();
+                        let mut resources = alloc::vec::Vec::new();
 
-                // Read and size BARs
-                let mut bar_index: u8 = 0;
-                while bar_index < 6 {
-                    let off = 0x10u8 + (bar_index * 4);
-                    let orig = pci_read(bus, slot, func, off);
-                    if orig == 0 || orig == 0xFFFF_FFFF {
-                        bar_index += 1;
-                        continue;
-                    }
+                        // ECAM read/write helpers (operate on the function's config phys base)
+                        let ecam_read = |base_phys: u64, off: u8| -> u32 {
+                            let idx = ((off & 0xFC) / 4) as usize;
+                            unsafe { (base_phys as *const u32).add(idx).read_volatile() }
+                        };
+                        let ecam_write = |base_phys: u64, off: u8, val: u32| {
+                            let idx = ((off & 0xFC) / 4) as usize;
+                            unsafe { (base_phys as *mut u32).add(idx).write_volatile(val) }
+                        };
 
-                    // IO BAR
-                    if (orig & 0x1) == 0x1 {
-                        // Save, write all 1s, read back, restore
-                        pci_write(bus, slot, func, off, 0xFFFF_FFFF);
-                        let mask = pci_read(bus, slot, func, off);
-                        pci_write(bus, slot, func, off, orig);
+                        // Read and size BARs
+                        let mut bar_index: u8 = 0;
+                        while bar_index < 6 {
+                            let off = 0x10u8 + (bar_index * 4);
+                            let orig = ecam_read(phys_f, off);
+                            if orig == 0 || orig == 0xFFFF_FFFF {
+                                bar_index += 1;
+                                continue;
+                            }
 
-                        let mask32 = mask & 0xFFFF_FFFC;
-                        let size = ((!mask32).wrapping_add(1)) as u64;
-                        let addr = (orig & 0xFFFFFFFC) as u64;
-                        resources.push(Resource { kind: ResourceKind::IO, addr, len: size });
-                        bar_index += 1;
-                        continue;
-                    }
+                            // IO BAR
+                            if (orig & 0x1) == 0x1 {
+                                // Save, write all 1s, read back, restore
+                                ecam_write(phys_f, off, 0xFFFF_FFFF);
+                                let mask = ecam_read(phys_f, off);
+                                ecam_write(phys_f, off, orig);
 
-                    // Memory BAR - could be 64-bit
-                    let mem_type = (orig >> 1) & 0x3;
-                    if mem_type == 0x2 {
-                        // 64-bit BAR consumes this and the next
-                        let off_high = 0x10u8 + ((bar_index + 1) * 4);
-                        let orig_high = pci_read(bus, slot, func, off_high);
+                                let mask32 = mask & 0xFFFF_FFFC;
+                                let size = ((!mask32).wrapping_add(1)) as u64;
+                                let addr = (orig & 0xFFFFFFFC) as u64;
+                                resources.push(Resource { kind: ResourceKind::IO, addr, len: size });
+                                bar_index += 1;
+                                continue;
+                            }
 
-                        // Write mask to low and high
-                        pci_write(bus, slot, func, off, 0xFFFF_FFFF);
-                        pci_write(bus, slot, func, off_high, 0xFFFF_FFFF);
-                        let mask_low = pci_read(bus, slot, func, off) as u32;
-                        let mask_high = pci_read(bus, slot, func, off_high) as u32;
-                        // Restore originals
-                        pci_write(bus, slot, func, off, orig);
-                        pci_write(bus, slot, func, off_high, orig_high);
+                            // Memory BAR - could be 64-bit
+                            let mem_type = (orig >> 1) & 0x3;
+                            if mem_type == 0x2 {
+                                // 64-bit BAR consumes this and the next
+                                let off_high = 0x10u8 + ((bar_index + 1) * 4);
+                                let orig_high = ecam_read(phys_f, off_high);
 
-                        let mask64 = ((mask_high as u64) << 32) | (mask_low as u64);
-                        let mask64_base = mask64 & !0xF_u64;
-                        let size = ((!mask64_base).wrapping_add(1)) as u64;
-                        let addr = (((orig_high as u64) << 32) | ((orig as u64) & 0xFFFF_FFF0)) as u64;
-                        resources.push(Resource { kind: ResourceKind::MemoryMapped, addr, len: size });
+                                // Write mask to low and high
+                                ecam_write(phys_f, off, 0xFFFF_FFFF);
+                                ecam_write(phys_f, off_high, 0xFFFF_FFFF);
+                                let mask_low = ecam_read(phys_f, off) as u32;
+                                let mask_high = ecam_read(phys_f, off_high) as u32;
+                                // Restore originals
+                                ecam_write(phys_f, off, orig);
+                                ecam_write(phys_f, off_high, orig_high);
 
-                        // Skip the next BAR since it was part of 64-bit
-                        bar_index += 2;
-                        continue;
-                    } else {
-                        // 32-bit memory BAR
-                        pci_write(bus, slot, func, off, 0xFFFF_FFFF);
-                        let mask = pci_read(bus, slot, func, off);
-                        pci_write(bus, slot, func, off, orig);
+                                let mask64 = ((mask_high as u64) << 32) | (mask_low as u64);
+                                let mask64_base = mask64 & !0xF_u64;
+                                let size = ((!mask64_base).wrapping_add(1)) as u64;
+                                let addr = (((orig_high as u64) << 32) | ((orig as u64) & 0xFFFF_FFF0)) as u64;
+                                resources.push(Resource { kind: ResourceKind::MemoryMapped, addr, len: size });
 
-                        let mask32 = (mask & !0xF) as u32;
-                        let size = ((!mask32).wrapping_add(1)) as u64;
-                        let addr = (orig & 0xFFFF_FFF0) as u64;
-                        resources.push(Resource { kind: ResourceKind::MemoryMapped, addr, len: size });
-                        bar_index += 1;
-                        continue;
-                    }
-                }
+                                // Skip the next BAR since it was part of 64-bit
+                                bar_index += 2;
+                                continue;
+                            } else {
+                                // 32-bit memory BAR
+                                ecam_write(phys_f, off, 0xFFFF_FFFF);
+                                let mask = ecam_read(phys_f, off);
+                                ecam_write(phys_f, off, orig);
 
-                // Read interrupt information (offset 0x3C: byte IRQ, byte Pin)
-                let intr = pci_read(bus, slot, func, 0x3C);
-                let irq_line = (intr & 0xFF) as u8;
-                let irq_pin = ((intr >> 8) & 0xFF) as u8;
+                                let mask32 = (mask & !0xF) as u32;
+                                let size = ((!mask32).wrapping_add(1)) as u64;
+                                let addr = (orig & 0xFFFF_FFF0) as u64;
+                                resources.push(Resource { kind: ResourceKind::MemoryMapped, addr, len: size });
+                                bar_index += 1;
+                                continue;
+                            }
+                        }
+
+                        // Read interrupt information (offset 0x3C: byte IRQ, byte Pin)
+            let intr_dword = ecam_read(phys_f, 0x3C);
+            let irq_line = (intr_dword & 0xFF) as u8;
+            let irq_pin = ((intr_dword >> 8) & 0xFF) as u8;
                 if irq_line != 0 && irq_line != 0xFF {
                     resources.push(Resource { kind: ResourceKind::Interrupt(irq_line), addr: 0, len: 0 });
                 }
@@ -265,7 +283,7 @@ pub fn scan_and_register_with_phys_offset(physical_memory_offset: u64) {
                     }
                 }
 
-                let info = DeviceInfo {
+                        let info = DeviceInfo {
                     vendor_id: vendor,
                     device_id: device,
                     class,
@@ -276,8 +294,43 @@ pub fn scan_and_register_with_phys_offset(physical_memory_offset: u64) {
                     description: String::from(format!("PCI {:02x}:{:02x}.{:x}", bus, slot, func)),
                 };
 
-                let id = GLOBAL_MANAGER.register_device(info);
-                println!("PCI: registered device id={} {:04x}:{:04x} @ {}:{}:{}", id, vendor, device, bus, slot, func);
+                // Try to merge with an existing device (e.g., discovered via ACPI).
+                        if let Some(existing_id) = GLOBAL_MANAGER.merge_or_register(info.clone()) {
+                            println!("PCI: merged device {:04x}:{:04x} into existing id={}", vendor, device, existing_id);
+                        } else {
+                            let id = GLOBAL_MANAGER.register_device(info);
+                            println!("PCI: registered device id={} {:04x}:{:04x} @ {}:{}:{}", id, vendor, device, bus, slot, func);
+                        }
+                    }
+                }
+            }
+        }
+        return;
+    }
+
+    // Fallback to legacy port-based config access when no ECAM present
+    for bus in 0u8..=255u8 {
+        for slot in 0u8..32u8 {
+            // First probe function 0 to see if device exists and whether it's multifunction
+            let vendor_device = pci_read(bus, slot, 0, 0);
+            let vendor0 = (vendor_device & 0xFFFF) as u16;
+            if vendor0 == 0xFFFF || vendor0 == 0x0000 {
+                continue;
+            }
+
+            // Determine if multifunction by reading header type (byte at 0x0E)
+            let header_dword = pci_read(bus, slot, 0, 0x0C);
+            let header_type = ((header_dword >> 16) & 0xFF) as u8;
+            let multifunction = (header_type & 0x80) != 0;
+
+            let max_funcs = if multifunction { 8 } else { 1 };
+
+            for func in 0u8..max_funcs {
+                let vendor_device = pci_read(bus, slot, func, 0);
+                let vendor = (vendor_device & 0xFFFF) as u16;
+                if vendor == 0xFFFF || vendor == 0x0000 {
+                    continue;
+                }
             }
         }
     }

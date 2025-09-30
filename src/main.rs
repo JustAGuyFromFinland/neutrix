@@ -107,6 +107,17 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 			println!("[HAL] APIC initialized but failed to read local APIC id");
 		}
 	}
+
+	// If CPU supports TSC and APIC is present, switch to TSC-deadline timer
+	if hal::apic::is_initialized() && crate::arch::detect_cpu_features().tsc {
+		// Disable PIT (already handled in enable_cpu_features if tsc was present),
+		// initialize TSC-deadline timer and calibrate it against HPET if available
+		if crate::arch::tsc_timer::init(&mut mapper, &mut frame_allocator, phys_mem_offset, 10) {
+			println!("[TIMER] TSC-deadline timer initialized (calibrated if HPET present)");
+		} else {
+			println!("[TIMER] TSC-deadline timer not enabled (missing features or calibration failed)");
+		}
+	}
 	x86_64::instructions::interrupts::enable();
 
 	// Print registered devices for debugging (human-readable class/subclass)

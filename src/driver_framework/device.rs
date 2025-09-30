@@ -13,7 +13,7 @@ pub struct Resource {
 	pub len: u64,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ResourceKind {
 	MemoryMapped,
 	IO,
