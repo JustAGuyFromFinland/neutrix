@@ -1,5 +1,6 @@
 use crate::*;
 use alloc::boxed::Box;
+use alloc::vec::Vec;
 use core::pin::Pin;
 use core::task::Poll;
 use futures_util::stream::Stream;
@@ -9,6 +10,7 @@ use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
 use pc_keyboard::*;
 use x86_64::structures::idt::InterruptStackFrame;
+use spin::Mutex;
 
 use crate::driver_framework::driver::Driver;
 use crate::driver_framework::device::{DeviceInfo, Resource, ResourceKind};
@@ -16,10 +18,17 @@ use crate::driver_framework::device::{DeviceInfo, Resource, ResourceKind};
 static SCANCODE_QUEUE: OnceCell<ArrayQueue<u8>> = OnceCell::uninit();
 static WAKER: AtomicWaker = AtomicWaker::new();
 
-pub struct Ps2KbdDriver;
+pub struct Ps2KbdDriver {
+    /// Tracks which IRQ vectors this driver registered so they can be
+    /// unregistered on stop/release. Protected by a spin::Mutex because
+    /// Driver methods take `&self`.
+    registered_vectors: Mutex<Vec<u8>>,
+}
 
 impl Ps2KbdDriver {
-    pub fn new() -> Self { Ps2KbdDriver }
+    pub fn new() -> Self {
+        Ps2KbdDriver { registered_vectors: Mutex::new(Vec::new()) }
+    }
 
     fn init_queue_if_needed(&self) {
         SCANCODE_QUEUE.try_init_once(|| ArrayQueue::new(100)).ok();
@@ -61,18 +70,34 @@ impl Driver for Ps2KbdDriver {
         let info = device.info();
         for r in info.resources.iter() {
             if let ResourceKind::Interrupt(vector) = r.kind {
+                // Register the handler and remember the vector so we can
+                // unregister it later during stop/release.
                 crate::arch::idt::register_irq_handler(vector, Ps2KbdDriver::irq_handler);
+                let mut reg = self.registered_vectors.lock();
+                if !reg.contains(&vector) {
+                    reg.push(vector);
+                }
             }
         }
         Ok(())
     }
 
     fn stop(&self, _device: &crate::driver_framework::device::DeviceHandle) {
-        // no-op: resources freed on release
+        // Unregister any IRQ handlers registered by this driver. Keep the
+        // vector list so a later `release` call is idempotent.
+        let reg = self.registered_vectors.lock();
+        for &v in reg.iter() {
+            crate::arch::idt::unregister_irq_handler(v);
+        }
     }
 
     fn release(&self, _device: &crate::driver_framework::device::DeviceHandle) {
-        // nothing for now
+        // Fully release resources and clear our registered vector list.
+        let mut reg = self.registered_vectors.lock();
+        for &v in reg.iter() {
+            crate::arch::idt::unregister_irq_handler(v);
+        }
+        reg.clear();
     }
 }
 
