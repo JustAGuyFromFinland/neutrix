@@ -207,5 +207,9 @@ impl fmt::Write for Writer {
 #[doc(hidden)]
 pub fn _print(args: fmt::Arguments) {
     use core::fmt::Write;
+    // Prefer VBE driver when available
+    if crate::driver_framework::drivers::vbe_vga::vbe_try_print(args) { return; }
+
+    // Fallback to boot VGA text buffer
     WRITER.lock().write_fmt(args).unwrap();
 }

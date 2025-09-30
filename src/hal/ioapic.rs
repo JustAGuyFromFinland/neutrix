@@ -267,3 +267,52 @@ pub fn enable_isos_for_local(phys_offset: VirtAddr, local_apic_id: u8) {
         }
     }
 }
+
+/// Unmask a specific GSI (clear mask bit) and set its vector/destination to this CPU.
+/// Returns true on success.
+pub fn unmask_gsi(gsi: u32, vector: u8, local_apic_id: u8, phys_offset: VirtAddr) -> bool {
+    if let Some((ioidx, local)) = find_ioapic_for_gsi(gsi) {
+        let table = IOAPIC_TABLE.lock();
+        if let Some(io) = table.get(ioidx) {
+            let virt = (io.phys_addr as u64 + phys_offset.as_u64()) as *mut u8;
+            if virt.is_null() { return false; }
+            unsafe {
+                let reg_low = 0x10 + (local as usize * 2) as u8;
+                let reg_high = reg_low + 1;
+                // Read current entries
+                let mut high = IoApic::read_reg(virt, reg_high);
+                let mut low = IoApic::read_reg(virt, reg_low);
+                // Set vector (bits 0..7)
+                low = (low & !0xFF) | (vector as u32 & 0xFF);
+                // Set destination (physical mode) in high dword ([63:56] -> high >> 24)
+                high = ((local_apic_id as u32) << 24) as u32;
+                // Clear mask bit (bit 16)
+                low &= !(1 << 16);
+                IoApic::write_reg(virt, reg_high, high);
+                IoApic::write_reg(virt, reg_low, low);
+            }
+            return true;
+        }
+    }
+    false
+}
+
+/// Read back the 64-bit redirection entry (low, high) for the given GSI.
+/// Returns (low, high) on success, None if the GSI isn't handled by any IOAPIC.
+pub fn read_redirection_entry(gsi: u32, phys_offset: VirtAddr) -> Option<(u32,u32)> {
+    if let Some((ioidx, local)) = find_ioapic_for_gsi(gsi) {
+        let table = IOAPIC_TABLE.lock();
+        if let Some(io) = table.get(ioidx) {
+            let virt = (io.phys_addr as u64 + phys_offset.as_u64()) as *mut u8;
+            if virt.is_null() { return None; }
+            unsafe {
+                let reg_low = 0x10 + (local as usize * 2) as u8;
+                let reg_high = reg_low + 1;
+                let low = IoApic::read_reg(virt, reg_low);
+                let high = IoApic::read_reg(virt, reg_high);
+                return Some((low, high));
+            }
+        }
+    }
+    None
+}

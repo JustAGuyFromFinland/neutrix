@@ -5,6 +5,7 @@ use core::pin::Pin;
 use core::task::Poll;
 use futures_util::stream::Stream;
 use futures_util::task::AtomicWaker;
+use core::sync::atomic::Ordering as AtomicOrdering;
 use futures_util::StreamExt;
 use conquer_once::spin::OnceCell;
 use crossbeam_queue::ArrayQueue;
@@ -70,14 +71,25 @@ impl Driver for Ps2KbdDriver {
         let info = device.info();
         for r in info.resources.iter() {
             if let ResourceKind::Interrupt(vector) = r.kind {
-                // Register the handler and remember the vector so we can
-                // unregister it later during stop/release.
+                // Register IRQ handler now so the kernel can receive scancodes when
+                // the controller/port is enabled. Keep the vector in our registered
+                // list so we can unregister on stop/release.
                 crate::arch::idt::register_irq_handler(vector, Ps2KbdDriver::irq_handler);
                 let mut reg = self.registered_vectors.lock();
-                if !reg.contains(&vector) {
-                    reg.push(vector);
-                }
+                if !reg.contains(&vector) { reg.push(vector); }
             }
+        }
+        // Start with keyboard port disabled by default so callers must enable it
+        // explicitly (e.g., getline). Use PS/2 controller command 0xAD.
+        {
+            use x86_64::instructions::port::Port;
+            // Wait until input buffer clear then send 0xAD
+            let mut status_port: Port<u8> = Port::new(0x64);
+            // simple spin wait (small) to avoid blocking too long
+            for _ in 0..10000 { if (unsafe { status_port.read() } & 0x02) == 0 { break; } }
+            let mut cmd_port: Port<u8> = Port::new(0x64);
+            unsafe { cmd_port.write(0xADu8); }
+            crate::driver_framework::drivers::console::console_print_first("[kbd] PS/2 keyboard port disabled by default at start()\n");
         }
         Ok(())
     }
@@ -108,7 +120,10 @@ pub fn boxed_driver() -> Box<dyn Driver> {
 // Provide a small async stream API for consumers (getline/print_keypresses) to use
 pub struct ScancodeStream { _private: () }
 impl ScancodeStream {
-    pub fn new() -> Self { SCANCODE_QUEUE.try_init_once(|| ArrayQueue::new(100)).ok(); ScancodeStream { _private: () } }
+    pub fn new() -> Self {
+        SCANCODE_QUEUE.try_init_once(|| ArrayQueue::new(100)).ok();
+        ScancodeStream { _private: () }
+    }
 }
 impl Stream for ScancodeStream {
     type Item = u8;
@@ -124,6 +139,51 @@ pub async fn getline() -> alloc::string::String {
     use alloc::string::String;
     use alloc::vec::Vec;
 
+    // Enable PS/2 keyboard port before starting the getline stream and
+    // disable it before returning. This masks the keyboard at the controller
+    // level (not the IRQ vector) so other input remains unaffected.
+    fn read_status_port() -> u8 {
+        use x86_64::instructions::port::Port;
+        let mut p: Port<u8> = Port::new(0x64);
+        unsafe { p.read() }
+    }
+
+    fn wait_input_clear_local(max_loops: usize) -> bool {
+        for _ in 0..max_loops {
+            if (read_status_port() & 0x02) == 0 { return true; }
+        }
+        false
+    }
+
+    fn write_controller_cmd_local(cmd: u8) -> bool {
+        use x86_64::instructions::port::Port;
+        if !wait_input_clear_local(10000) { return false; }
+        let mut p: Port<u8> = Port::new(0x64);
+        unsafe { p.write(cmd); }
+        true
+    }
+
+    fn enable_keyboard_port() {
+        // 0xAE = Enable first PS/2 port (keyboard)
+        if !write_controller_cmd_local(0xAE) {
+            crate::driver_framework::drivers::console::console_print_first("[kbd] Warning: failed to enable PS/2 keyboard port (0xAE)\n");
+        } else {
+            crate::driver_framework::drivers::console::console_print_first("[kbd] PS/2 keyboard port enabled\n");
+        }
+    }
+
+    fn disable_keyboard_port() {
+        // 0xAD = Disable first PS/2 port (keyboard)
+        if !write_controller_cmd_local(0xAD) {
+            crate::driver_framework::drivers::console::console_print_first("[kbd] Warning: failed to disable PS/2 keyboard port (0xAD)\n");
+        } else {
+            crate::driver_framework::drivers::console::console_print_first("[kbd] PS/2 keyboard port disabled\n");
+        }
+    }
+
+    // Enable keyboard at controller before creating the stream so the device
+    // will begin reporting scancodes. We'll disable it before returning.
+    enable_keyboard_port();
     let mut scancodes = ScancodeStream::new();
     let mut keyboard = Keyboard::new(ScancodeSet1::new(), layouts::Us104Key, HandleControl::Ignore);
 
@@ -139,6 +199,8 @@ pub async fn getline() -> alloc::string::String {
                                 // echo newline and return
                                 println!("");
                                 let s: String = buf.iter().collect();
+                                // disable keyboard before returning
+                                disable_keyboard_port();
                                 return s;
                             }
                             '\x08' => {
@@ -163,7 +225,8 @@ pub async fn getline() -> alloc::string::String {
         }
     }
 
-    // If the stream ended, return whatever we have
+    // If the stream ended, disable keyboard and return whatever we have
+    disable_keyboard_port();
     buf.iter().collect()
 }
 
