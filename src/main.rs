@@ -14,8 +14,10 @@ use x86_64::instructions::port::Port;
 entry_point!(kernel_main);
 
 extern crate neutrix;
+extern crate alloc;
 
 use neutrix::*;
+use crate::driver_framework::drivers::ps2kbd;
 
 fn kernel_main(boot_info: &'static BootInfo) -> ! {
 	enable_sse();
@@ -51,6 +53,10 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 	allocator::init_heap(&mut mapper, &mut frame_allocator)
 		.expect("heap initialization failed");
 
+	init_gdt();
+	setcolor!(Color::Yellow, Color::Black);
+	init_idt();
+
 	// Initialize hardware through HAL (ACPI parsing may allocate)
 	let (cpu_info, acpi_status) = hal::init_hardware(phys_mem_offset);
 
@@ -58,10 +64,30 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 	// Pass the physical memory offset so PCI code can probe MMIO (MSI-X tables)
 	devices::pci::scan_and_register_with_phys_offset(phys_mem_offset.as_u64());
 
+	// Manually register a PS/2 keyboard device (not discoverable via PCI)
+	let kbd_info = driver_framework::device::DeviceInfo {
+ 		vendor_id: 0xffff,
+ 		device_id: 0xffff,
+ 		class: 0x09, // Input Device
+ 		subclass: 0x00,
+ 		prog_if: 0x00,
+ 		resources: {
+ 			let mut v = alloc::vec::Vec::new();
+ 			v.push(driver_framework::device::Resource { kind: driver_framework::device::ResourceKind::Interrupt(33), addr: 0, len: 0 });
+ 			v
+ 		},
+ 		capabilities: alloc::vec::Vec::new(),
+ 		description: alloc::format!("PS/2 Keyboard"),
+ 	};
+
+	let dev_id = crate::driver_framework::manager::GLOBAL_MANAGER.register_device(kbd_info);
+	// Attach our KMDF-style ps2 keyboard driver
+	let drv = driver_framework::drivers::ps2kbd::boxed_driver();
+	if let Err(e) = crate::driver_framework::manager::GLOBAL_MANAGER.attach_driver(dev_id, drv) {
+ 		println!("Failed to attach PS/2 keyboard driver: {}", e);
+ 	}
+
 	// Continue with architecture-specific initialization
-	init_gdt();
-	setcolor!(Color::Yellow, Color::Black);
-	init_idt();
 	// Do not initialize legacy PICs when running with APIC-only interrupts.
 	// Instead, mask (disable) both PICs so they don't deliver IRQs.
 	unsafe {
@@ -87,7 +113,7 @@ fn kernel_main(boot_info: &'static BootInfo) -> ! {
 	crate::driver_framework::manager::GLOBAL_MANAGER.list_devices();
 
 	let mut executor = Executor::new();
-	executor.spawn(Task::new(print_keypresses()));
+	executor.spawn(Task::new(driver_framework::drivers::ps2kbd::print_keypresses()));
 	executor.run();
 	hlt();
 }
