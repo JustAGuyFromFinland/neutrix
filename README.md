@@ -88,12 +88,4 @@ See `src/` for more detailed module-level comments and the `copilot-instructions
 - Add or update unit tests where practical; run `cargo +nightly test` when applicable (note: many kernel subsystems are not unit-testable under host), and test in QEMU for integration changes.
 
 ## License
-No license file was found in this repository snapshot. If you intend to publish or share this repository, add a LICENSE file (for example, MIT or Apache-2.0) to make the intended terms explicit.
-
-## Next steps / suggestions
-- Add a `LICENSE` file if you want to release the code.
-- Add a small CI workflow (GitHub Actions) that runs `cargo check` / `cargo +nightly bootimage` in a build matrix and uploads the bootimage as an artifact.
-- Add a short `How to debug` doc describing using QEMU, GDB, and serial/VGA outputs.
-
----
-If you want, I can: add a GitHub Actions workflow, add a LICENSE file, or generate a short "contributor setup" doc with platform-specific notes for Windows development. Which would you like next?
+Licensed under MIT license year 2025
